@@ -1,0 +1,27 @@
+# ============================================================
+# Variables partagées entre tous les playbooks
+# ============================================================
+# Centraliser les variables ici évite de les répéter dans chaque playbook.
+# Si l'EFS change ou si le domaine change, on modifie un seul fichier.
+# ============================================================
+
+# --- EFS (stockage partagé des segments HLS) ---
+# ID du système de fichiers EFS créé par Terraform.
+# Les segments HLS générés par NGINX sont écrits ici,
+# et lus par toutes les instances Frontend de l'ASG.
+efs_id: "fs-0a8e1af25ce7ced67"
+efs_mount_point: "/mnt/efs/hls"
+
+# --- NGINX + RTMP ---
+nginx_rtmp_port: 1935          # Port RTMP standard (push du flux par FFmpeg)
+hls_fragment_duration: 2       # Durée de chaque segment HLS en secondes
+hls_playlist_length: 10        # Durée totale de la playlist HLS en secondes
+
+# --- Application ---
+domain_name: "projet-streaming-ralph-steve.devops.intuitivelabs.net"
+app_name: "gin208"
+
+# --- CloudWatch ---
+cloudwatch_region: "us-east-1"
+cloudwatch_log_group: "/gin208/app"
+cloudwatch_metrics_namespace: "GIN208"

@@ -1,0 +1,115 @@
+---
+# ============================================================
+# playbooks/streamer.yml - Configuration de l'instance Streamer
+# ============================================================
+# Ce playbook configure FFmpeg sur l'instance Streamer.
+# FFmpeg est le "caméraman numérique" : il capture la source vidéo
+# (simulée ici par un fichier de test) et la pousse en RTMP
+# vers le Frontend qui la convertit en HLS.
+#
+# Dans le contexte téléopération :
+# FFmpeg = le composant embarqué dans le véhicule qui encode
+# et transmet le flux vidéo de la caméra vers l'opérateur distant.
+#
+# Exécution : ansible-playbook playbooks/streamer.yml
+# ============================================================
+
+- name: Configuration de l'instance Streamer (FFmpeg)
+  hosts: role_streamer
+  become: true
+
+  vars_files:
+    - ../vars/generic.yaml
+
+  # Variables spécifiques au Streamer
+  vars:
+    # IP/DNS du Frontend vers lequel pousser le flux RTMP.
+    # On utilise l'IP privée du Frontend pour rester dans le VPC (trafic gratuit).
+    # À adapter selon l'IP réelle de l'instance Frontend après déploiement.
+    frontend_private_ip: "{{ hostvars[groups['role_frontend'][0]]['private_ip_address'] }}"
+    rtmp_url: "rtmp://{{ frontend_private_ip }}:{{ nginx_rtmp_port }}/live/stream"
+
+    # Service systemd qui lance FFmpeg en continu
+    ffmpeg_service_name: "gin208-streamer"
+
+  tasks:
+
+    # ----------------------------------------------------------
+    # 1. Installation de FFmpeg
+    # ----------------------------------------------------------
+    - name: Mise a jour du cache apt
+      ansible.builtin.command: apt-get update -qq
+      changed_when: false
+
+    - name: Installation de FFmpeg
+      ansible.builtin.command: apt-get install -y ffmpeg
+      args:
+        creates: /usr/bin/ffmpeg
+
+    - name: Verification de la version FFmpeg installee
+      ansible.builtin.command: ffmpeg -version
+      register: ffmpeg_version
+      changed_when: false   # Cette commande ne modifie rien
+
+    - name: Affichage de la version FFmpeg
+      ansible.builtin.debug:
+        msg: "{{ ffmpeg_version.stdout_lines[0] }}"
+
+    # ----------------------------------------------------------
+    # 2. Création d'un service systemd pour FFmpeg
+    # ----------------------------------------------------------
+    # Un service systemd permet à FFmpeg de démarrer automatiquement
+    # au boot et de redémarrer en cas de crash (restart=always).
+    # Sans ça, FFmpeg s'arrêterait si la session SSH est fermée.
+    - name: Creation du service systemd FFmpeg
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/{{ ffmpeg_service_name }}.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=GIN208 FFmpeg Streamer - Push RTMP vers Frontend
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          # Redémarre automatiquement si FFmpeg crashe (resilience)
+          Restart=always
+          RestartSec=5
+
+          # Flux de test : génère une vidéo synthétique (grille de couleurs)
+          # à la place d'une vraie caméra, pour la démonstration.
+          # En production : remplacer /dev/video0 par la source réelle.
+          ExecStart=/usr/bin/ffmpeg \
+            -re \
+            -f lavfi -i testsrc=size=1280x720:rate=25 \
+            -f lavfi -i sine=frequency=440 \
+            -c:v libx264 -preset veryfast -tune zerolatency \
+            -b:v 1000k -maxrate 1000k -bufsize 2000k \
+            -g 50 -keyint_min 25 \
+            -c:a aac -b:a 128k \
+            -f flv {{ rtmp_url }}
+
+          StandardOutput=journal
+          StandardError=journal
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Recharger systemd
+
+    # ----------------------------------------------------------
+    # 3. Démarrage du service FFmpeg
+    # ----------------------------------------------------------
+    - name: Service FFmpeg demarre et active au boot
+      ansible.builtin.systemd:
+        name: "{{ ffmpeg_service_name }}"
+        state: started
+        enabled: true
+        daemon_reload: true
+
+  handlers:
+    - name: Recharger systemd
+      ansible.builtin.systemd:
+        daemon_reload: true

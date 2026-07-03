@@ -1,0 +1,37 @@
+# ============================================================
+# Inventaire dynamique AWS EC2
+# ============================================================
+# Au lieu de lister les IPs en dur (inventaire statique), ce fichier
+# demande à boto3 de découvrir les instances AWS en temps réel.
+#
+# Avantage : si une instance est recréée (nouvelle IP), l'inventaire
+# se met à jour automatiquement. Aucune modification manuelle.
+#
+# Prérequis : collection amazon.aws installée + credentials AWS actifs.
+# Installation : ansible-galaxy collection install amazon.aws
+# ============================================================
+
+plugin: amazon.aws.aws_ec2
+
+# Région où chercher les instances
+regions:
+  - us-east-1
+
+# Filtres : on ne cible que les instances du projet qui tournent.
+# Cela évite de toucher par erreur des instances d'autres étudiants.
+filters:
+  instance-state-name: running
+  tag:Owner: julien-ralph
+
+# Groupes dynamiques basés sur le tag "Role".
+# Résultat : groupe "role_frontend" et groupe "role_streamer".
+# On cible ces groupes dans les playbooks.
+keyed_groups:
+  - key: tags.Role
+    prefix: role
+    separator: "_"
+
+# Ansible se connecte via l'IP publique de l'instance (SSH).
+# Les instances sont dans des subnets publics donc accessibles directement.
+compose:
+  ansible_host: public_ip_address

@@ -1,0 +1,106 @@
+---
+# ============================================================
+# playbooks/frontend.yml - Configuration des instances Frontend
+# ============================================================
+# Ce playbook configure NGINX avec le module RTMP sur toutes les
+# instances du groupe "role_frontend" (découvertes via les tags AWS).
+#
+# Ce qu'il fait :
+#   1. Installe NGINX + le module RTMP
+#   2. Crée le dossier HLS sur l'EFS (partagé entre toutes les instances)
+#   3. Déploie la configuration NGINX depuis le template Jinja2
+#   4. Démarre et active NGINX au démarrage
+#
+# Exécution : ansible-playbook playbooks/frontend.yml
+# ============================================================
+
+- name: Configuration des instances Frontend (NGINX + RTMP)
+  # "role_frontend" = groupe créé par l'inventaire dynamique
+  # à partir du tag Role: frontend sur les instances EC2.
+  hosts: role_frontend
+  become: true   # Équivalent de sudo : nécessaire pour installer des paquets
+
+  vars_files:
+    - ../vars/generic.yaml
+
+  tasks:
+
+    # ----------------------------------------------------------
+    # 1. Installation de NGINX et du module RTMP
+    # ----------------------------------------------------------
+    - name: Mise a jour du cache apt
+      ansible.builtin.command: apt-get update -qq
+      changed_when: false
+
+    - name: Installation de NGINX et du module RTMP
+      ansible.builtin.command: apt-get install -y nginx libnginx-mod-rtmp
+      args:
+        creates: /usr/sbin/nginx
+
+    - name: Installation de amazon-efs-utils
+      ansible.builtin.command: apt-get install -y amazon-efs-utils
+      args:
+        creates: /usr/bin/mount.efs
+      ignore_errors: true
+
+    # ----------------------------------------------------------
+    # 2. Montage EFS (si pas encore fait par user_data)
+    # ----------------------------------------------------------
+    # Le user_data monte l'EFS au premier démarrage via fstab.
+    # Cette tâche s'assure que le dossier existe et est monté
+    # avant de déployer la config NGINX.
+    - name: Creation du point de montage EFS
+      ansible.builtin.file:
+        path: "{{ efs_mount_point }}"
+        state: directory
+        owner: www-data    # Utilisateur NGINX
+        group: www-data
+        mode: "0755"
+
+    - name: Installation de nfs-common (client NFS natif)
+      ansible.builtin.command: apt-get install -y nfs-common
+      args:
+        creates: /sbin/mount.nfs4
+
+    - name: Montage EFS si pas encore monte
+      ansible.posix.mount:
+        path: "{{ efs_mount_point }}"
+        src: "{{ efs_id }}.efs.{{ cloudwatch_region }}.amazonaws.com:/"
+        fstype: nfs4
+        opts: "nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport,_netdev"
+        state: mounted
+
+    # ----------------------------------------------------------
+    # 3. Déploiement de la configuration NGINX
+    # ----------------------------------------------------------
+    # Le module "template" lit nginx-rtmp.conf.j2, substitue les
+    # variables Jinja2, et écrit le résultat sur l'instance distante.
+    - name: Deploiement de la configuration NGINX+RTMP
+      ansible.builtin.template:
+        src: ../templates/nginx-rtmp.conf.j2
+        dest: /etc/nginx/nginx.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Recharger NGINX
+
+    # ----------------------------------------------------------
+    # 4. Démarrage de NGINX
+    # ----------------------------------------------------------
+    - name: NGINX demarre et active au boot
+      ansible.builtin.systemd:
+        name: nginx
+        state: started
+        enabled: true
+        daemon_reload: true
+
+  # ----------------------------------------------------------
+  # Handlers : exécutés uniquement si une tâche les notifie
+  # ----------------------------------------------------------
+  # Le handler ne s'exécute qu'une seule fois à la fin du playbook,
+  # même si plusieurs tâches le notifient. Évite les rechargements multiples.
+  handlers:
+    - name: Recharger NGINX
+      ansible.builtin.systemd:
+        name: nginx
+        state: reloaded

@@ -1,0 +1,104 @@
+# ============================================================
+# nginx-rtmp.conf.j2 - Template Jinja2 configuration NGINX+RTMP
+# ============================================================
+# Jinja2 = moteur de templates d'Ansible. Les variables sont
+# remplacees par les vraies valeurs au moment ou Ansible deploie
+# ce fichier sur les instances (via le module "template").
+#
+# Ce fichier configure deux choses :
+#   1. Le bloc HTTP  : sert les segments HLS aux navigateurs
+#   2. Le bloc RTMP  : reçoit le flux vidéo brut de FFmpeg (Streamer)
+#      et le découpe en segments HLS écrits sur l'EFS.
+# ============================================================
+
+# Chargement des modules dynamiques Ubuntu (inclut ngx_rtmp_module.so)
+include /etc/nginx/modules-enabled/*.conf;
+
+# Nombre de workers = nombre de CPUs disponibles sur l'instance.
+worker_processes auto;
+
+events {
+    # Connexions simultanées max par worker.
+    # 1024 est suffisant pour un lab de démonstration.
+    worker_connections 1024;
+}
+
+# ============================================================
+# Bloc HTTP : distribution des segments HLS aux clients
+# ============================================================
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+    # Optimisation : envoi de fichiers via le kernel (zero-copy).
+    sendfile on;
+
+    # Keepalive : maintient la connexion ouverte pour plusieurs requêtes.
+    keepalive_timeout 65;
+
+    server {
+        listen 80;
+        server_name {{ domain_name }};
+
+        # Point de terminaison du health check pour l'ALB.
+        # L'ALB envoie GET / toutes les 30s pour vérifier que l'instance répond.
+        location / {
+            return 200 'OK';
+            add_header Content-Type text/plain;
+        }
+
+        # Distribution des segments HLS depuis l'EFS.
+        # Le navigateur demande /hls/stream.m3u8 et les segments /hls/streamXXX.ts.
+        location /hls {
+            # Types MIME pour que le navigateur reconnaisse le format HLS.
+            types {
+                application/vnd.apple.mpegurl m3u8;
+                video/mp2t ts;
+            }
+
+            # Racine = point de montage EFS (les segments y sont écrits par RTMP).
+            root /mnt/efs;
+
+            # Pas de cache : les segments HLS changent toutes les 2 secondes.
+            add_header Cache-Control no-cache;
+
+            # Cross-Origin : le player HTML sur CloudFront/S3 peut accéder à l'ALB.
+            add_header Access-Control-Allow-Origin *;
+        }
+    }
+}
+
+# ============================================================
+# Bloc RTMP : réception du flux brut depuis le Streamer
+# ============================================================
+rtmp {
+    server {
+        # Port RTMP standard. FFmpeg pousse le flux sur rtmp://<ip>:{{ nginx_rtmp_port }}/live/stream
+        listen {{ nginx_rtmp_port }};
+
+        # Taille des chunks réseau. 4096 octets est la valeur recommandée pour HLS.
+        chunk_size 4096;
+
+        application live {
+            # Active le mode "live" : flux en temps réel, pas de VOD.
+            live on;
+
+            # Pas d'enregistrement local : les segments vont sur l'EFS, pas sur le disque local.
+            record off;
+
+            # Activation du transcodage RTMP → HLS.
+            hls on;
+
+            # Dossier où NGINX écrit les segments .ts et la playlist .m3u8.
+            # Ce dossier est sur l'EFS : toutes les instances Frontend voient les mêmes segments.
+            hls_path {{ efs_mount_point }};
+
+            # Durée de chaque segment vidéo. 2s = latence faible, adapté à la téléopération.
+            hls_fragment {{ hls_fragment_duration }}s;
+
+            # Durée totale de la playlist (fenêtre glissante).
+            # 10s = 5 segments de 2s. Le client télécharge les 5 derniers segments.
+            hls_playlist_length {{ hls_playlist_length }}s;
+        }
+    }
+}
